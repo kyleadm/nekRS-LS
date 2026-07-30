@@ -1033,8 +1033,6 @@ void lvlSet::solve(const double &fluidTime)
       auto o_psi = nrs->scalar->o_solution(scalarName);
       ls->o_S.copyFrom(o_psi, mesh->Nlocal);
 
-      if(nrs->fluid) nrs->fluid->pgcDelay = 1;
-
       if (ls->name == "tlsr") {
         if(platform->options.compareArgs("LVLSET FARFIELD FIX", "TRUE")) {
           auto o_delta = lvlSet::getDeltaFunction();
@@ -1081,6 +1079,13 @@ void lvlSet::solve(const double &fluidTime)
         svv::convoluteDerivative(mesh, o_filterPower, o_svvD);
       }
       ls->pseudoStepper(fluidTime);
+
+      if (ls->name == "tlsr" && nrs->fluid) {
+        // TLSR changes the normals/curvature entering B in Cifani Eq. (32).
+        // Invalidate the old jump-correction history now; it is rebuilt after
+        // applyPressureGradCorrection() computes the post-TLSR contribution.
+        nrs->fluid->requestPressureGradientCorrectionHistoryReset();
+      }
       resetOrder = true;
     }
   };
@@ -2286,9 +2291,7 @@ void lvlSet::applyPressureGradCorrection(const dfloat& We, occa::memory &o_sforc
   if(!platform->options.compareArgs("FLUID PRESSURE RHO SPLITTING GRAD CORRECTION", "TRUE"))
     return;
 
-  auto meshV = nrs->scalar->meshV;
-
-  auto o_delta = lvlSet::getDeltaFunction();
+  auto meshV = nrs->fluid->mesh;
 
   auto o_phi = nrs->scalar->o_solution("tls");
   bool avg = false;
@@ -2296,10 +2299,12 @@ void lvlSet::applyPressureGradCorrection(const dfloat& We, occa::memory &o_sforc
     avg = true;
   }
 
-  lvlSet::normalVector(o_phi, o_sforce, avg);
+  auto o_normal = platform->deviceMemoryPool.reserve<dfloat>(nrs->fluid->fieldOffsetSum);
+  lvlSet::normalVector(o_phi, o_normal, avg);
 
-  auto o_curvature = lvlSet::getCurvature(o_sforce);
+  auto o_curvature = lvlSet::getCurvature(o_normal);
   if(platform->options.compareArgs("LVLSET FARFIELD FIX", "TRUE")) {
+    auto o_delta = lvlSet::getDeltaFunction();
     auto deltaMax = platform->linAlg->max(meshV->Nlocal, o_delta, platform->comm.mpiComm());
 
     dfloat fixTol = 0.05;
@@ -2317,14 +2322,26 @@ void lvlSet::applyPressureGradCorrection(const dfloat& We, occa::memory &o_sforc
                             o_delta,
                             o_curvature);
   }
-  platform->linAlg->axmy(meshV->Nlocal, 1.0, o_delta, o_curvature);
+
+  auto o_psi = nrs->scalar->o_solution("cls");
+
+  // Cifani Eq. (32) requires B = (kappa/We) G psi, with exactly the same G
+  // used for pressure.  Using the fluid strong-gradient operator here makes
+  // the regularized surface-tension term discretely consistent with Gp;
+  // unlike delta(psi)n, this is an equality at the discrete operator level.
+  opSEM::strongGrad(meshV, nrs->fluid->fieldOffset, o_psi, o_sforce);
 
   platform->linAlg->axmyVector(meshV->Nlocal, 
-                              nrs->scalar->vFieldOffset,
+                              nrs->fluid->fieldOffset,
                               0,
                               -1.0/We, //reverse sign (see Nek5000)
                               o_curvature,
                               o_sforce);
+
+  // If TLSR invalidated the interface-geometry history, slot 0 now contains
+  // the updated B.  Replicate it over the old B slots and restart the next
+  // combined (Gp-B) extrapolation, as required by Cifani Eqs. (32)-(34).
+  nrs->fluid->commitPressureGradientCorrectionHistoryReset();
 
 }
 

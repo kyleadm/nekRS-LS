@@ -102,6 +102,12 @@ public:
 
   void makeForcing();
 
+  // A TLS re-initialization changes the interface geometry used in the Cifani
+  // pressure-jump term. Mark its history invalid now and rebuild it when the
+  // level-set plugin next supplies the updated surface-tension contribution.
+  void requestPressureGradientCorrectionHistoryReset();
+  void commitPressureGradientCorrectionHistoryReset();
+
   void updateZeroNormalMask()
   {
     if (platform->app->bc->hasUnalignedMixed(name)) {
@@ -133,8 +139,8 @@ public:
 
   occa::memory o_P;
   occa::memory o_Pe;
-  occa::memory o_Pgc;  //pressure gradient correction
-  occa::memory o_Pgce; //extrapolated pressure gradient correction
+  occa::memory o_Pgc;  // B history in Cifani Eq. (32): Gp - B
+  occa::memory o_Pgce; // extrapolated combined term \hat{(Gp - B)}, Cifani Eq. (34)
 
   dfloat rho0 = NAN;
   occa::memory o_rho;
@@ -144,6 +150,9 @@ public:
 
   int rhoSplitDelay = 2;
   int pgcDelay = 1;
+
+  bool pgcHistoryResetPending = false;
+  bool pgcCombinedHistoryReset = false;
 
   void finalize() override
   {
