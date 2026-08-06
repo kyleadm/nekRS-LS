@@ -966,6 +966,9 @@ void lvlSet_t::pseudoStepper(const double &fluidTime)
     throw std::logic_error("Unhandled StopMode value");
   };
 
+  double frequency = 0.0;
+  platform->options.getArgs(upperCase(this->name) + " FREQUENCY", frequency);
+
   while(!isFinalStep()) {
     MPI_Barrier(platform->comm.mpiComm());
     const double timeStartStep = MPI_Wtime();
@@ -1013,8 +1016,12 @@ void lvlSet_t::pseudoStepper(const double &fluidTime)
 
     this->printStepInfo(time, cfl, tstep, true, true);
     tstep += 1;
+
+    const double fraction = time / params.targetTime;
+    const double mappedTime = fluidTime + 0.99 * frequency * fraction;
+    this->writeFile(mappedTime, tstep);
   }
-  this->writeFile(fluidTime, tstep);
+  //this->writeFile(fluidTime, tstep);
 
   // copy the re-distanced solution back to the scalar
   std::string scalarName = this->name;
