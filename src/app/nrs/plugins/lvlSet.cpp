@@ -16,6 +16,7 @@
 #include "elliptic.h"
 #include "ellipticPrecon.h"
 #include "svv.hpp"
+#include <registerKernels.hpp>
 
 // private members
 namespace
@@ -167,8 +168,27 @@ void setInterfaceWidth();
 
 void setFarField();
 
+void parseLvlSetSections();
+
 void lvlSet::buildKernel(occa::properties _kernelInfo)
 {
+  // TODO: Temporary workaround to ensure the TLSR and CLSR solvers register the
+  // elliptic kernels they require. Currently, they may implicitly rely on the
+  // FLUID or SCALAR solvers for kernel registration, which may not include all
+  // kernels required by TLSR/CLSR.
+  {
+    // TLSR/CLSR sections have not been parsed yet; their regularization settings are needed below.
+    parseLvlSetSections();
+
+    registerEllipticKernels("tlsr",
+                            false,
+                            evalRegularization("SVV", "tlsr"));
+
+    registerEllipticKernels("clsr",
+                            false,
+                            evalRegularization("SVV", "clsr"));
+  }
+
   auto buildKernel = [](occa::properties &kernelInfo,
                         const std::string &kernelName,
                         const std::string &oklPath,
@@ -1913,30 +1933,18 @@ void lvlSet_t::mueAVM()
 {
   auto verbose = platform->verbose();
   auto mesh = this->meshV; // assumes mesh is the same for all scalars
-  static occa::memory o_diff0;
-
-  static occa::memory o_nuAVM;
-  static auto initialized = false;
-
   auto parPrefix = upperCase(this->name);
 
-  if (!initialized) {
-    if (evalRegularization("AVM_AVERAGED_MODAL_DECAY", this->name)) {
-      nekrsCheck(mesh->N < 5,
-          platform->comm.mpiComm(),
-          EXIT_FAILURE,
-          "%s\n",
-          "AVM requires polynomialOrder >= 5!");
-
-      o_diff0 = platform->device.malloc<dfloat>(mesh->Nlocal);
-      o_diff0.copyFrom(this->o_diff, mesh->Nlocal);
-    }
-    initialized = true;
-  }
-
   if (evalRegularization("AVM_AVERAGED_MODAL_DECAY", this->name)) {
-    // restore inital viscosity
-    this->o_diff.copyFrom(o_diff0, mesh->Nlocal);
+    nekrsCheck(mesh->N < 5,
+               platform->comm.mpiComm(),
+               EXIT_FAILURE,
+               "%s\n",
+               "AVM requires polynomialOrder >= 5!");
+
+    if (!this->o_avmmu.isInitialized()) {
+      this->o_avmmu = platform->device.malloc<dfloat>(mesh->Nlocal);
+    }
 
     dfloat kappa = 1.0;
     platform->options.getArgs(parPrefix + " REGULARIZATION AVM ACTIVATION WIDTH", kappa);
@@ -1954,31 +1962,14 @@ void lvlSet_t::mueAVM()
 
     auto o_eps = avm::viscosity(vFieldOffset, this->o_W, this->o_S, absTol, scalingCoeff, logS0, kappa, makeCont);
 
-    if (verbose) {
-      const dfloat maxEps = platform->linAlg->max(mesh->Nlocal, o_eps, platform->comm.mpiComm());
-      const dfloat minEps = platform->linAlg->min(mesh->Nlocal, o_eps, platform->comm.mpiComm());
-
-      const dfloat maxDiff = platform->linAlg->max(mesh->Nlocal, this->o_diff, platform->comm.mpiComm());
-      const dfloat minDiff = platform->linAlg->min(mesh->Nlocal, this->o_diff, platform->comm.mpiComm());
-
-      if (platform->comm.mpiRank() == 0) {
-        printf("applying a min/max artificial viscosity of (%f,%f) to %s with min/max visc (%f,%f)\n",
-               minEps,
-               maxEps,
-               this->name.c_str(),
-               minDiff,
-               maxDiff);
-      }
-    }
-
-    platform->linAlg->axpby(mesh->Nlocal, 1.0, o_eps, 1.0, this->o_diff, 0, 0);
+    this->o_avmmu.copyFrom(o_eps, mesh->Nlocal);
 
     if (verbose) {
-      const dfloat maxDiff = platform->linAlg->max(mesh->Nlocal, this->o_diff, platform->comm.mpiComm());
-      const dfloat minDiff = platform->linAlg->min(mesh->Nlocal, this->o_diff, platform->comm.mpiComm());
+      const dfloat maxDiff = platform->linAlg->max(mesh->Nlocal, this->o_avmmu, platform->comm.mpiComm());
+      const dfloat minDiff = platform->linAlg->min(mesh->Nlocal, this->o_avmmu, platform->comm.mpiComm());
 
       if (platform->comm.mpiRank() == 0) {
-        printf("%s now has a min/max visc: (%f,%f)\n", this->name.c_str(), minDiff, maxDiff);
+        printf("%s now has a min/max artificial viscosity: (%f,%f)\n", this->name.c_str(), minDiff, maxDiff);
       }
     }
   }
@@ -2156,6 +2147,10 @@ void lvlSet::clsrAx(elliptic_t* elliptic,
 
   auto o_wrk = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
   platform->linAlg->fill(mesh->Nlocal, 0.0, o_wrk);
+
+  if (evalRegularization("AVM_AVERAGED_MODAL_DECAY", clsr->name)) {
+    platform->linAlg->axpby(mesh->Nlocal, 1.0, clsr->o_avmmu, 1.0, o_wrk);
+  }
 
   if (!elliptic->AxKernel.isInitialized()) elliptic->AxKernel = loadKernel(elliptic->svv);
   elliptic->AxKernel(NelementsList,
