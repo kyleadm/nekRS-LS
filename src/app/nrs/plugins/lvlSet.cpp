@@ -2320,11 +2320,16 @@ void lvlSet::applyPressureGradCorrection(const dfloat& We, occa::memory &o_sforc
 
   auto o_psi = nrs->scalar->o_solution("cls");
 
-  // Cifani Eq. (32) requires B = (kappa/We) G psi, with exactly the same G
-  // used for pressure.  Using the fluid strong-gradient operator here makes
-  // the regularized surface-tension term discretely consistent with Gp;
-  // unlike delta(psi)n, this is an equality at the discrete operator level.
-  opSEM::strongGrad(meshV, nrs->fluid->fieldOffset, o_psi, o_sforce);
+  // Yokoi density scaling for this CLS convention (psi=1 in the liquid,
+  // psi=0 in the gas): delta_scaling = 2 psi delta. In balanced-force
+  // form this is obtained with psi_scaling = psi^2, so that G psi_scaling
+  // uses exactly the same discrete G as the pressure gradient.
+  auto o_psiScaling = platform->deviceMemoryPool.reserve<dfloat>(meshV->Nlocal);
+  o_psi.copyTo(o_psiScaling, meshV->Nlocal);
+  platform->linAlg->axmy(meshV->Nlocal, 1.0, o_psi, o_psiScaling); // psi^2
+
+  // Cifani Eq. (32), with Yokoi's density-scaled balanced surface term.
+  opSEM::strongGrad(meshV, nrs->fluid->fieldOffset, o_psiScaling, o_sforce);
 
   platform->linAlg->axmyVector(meshV->Nlocal, 
                               nrs->fluid->fieldOffset,
@@ -2378,6 +2383,11 @@ void lvlSet::addSurfaceTensionAcc(const dfloat& We, occa::memory &o_sforceAcc)
                             o_curvature);
   }
   platform->linAlg->axmy(meshV->Nlocal, 1.0, o_delta, o_curvature);
+
+  // Yokoi density scaling. Here psi=1 in the liquid and psi=0 in the gas,
+  // so delta_scaling = 2 psi delta.
+  auto o_psi = nrs->scalar->o_solution("cls");
+  platform->linAlg->axmy(meshV->Nlocal, 2.0, o_psi, o_curvature);
 
   //Divide by density
   auto o_rho = nrs->fluid->o_prop + 1 * nrs->fluid->fieldOffset;
