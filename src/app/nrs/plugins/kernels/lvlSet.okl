@@ -666,8 +666,8 @@ void rsum(dfloat *s_sum, const dlong t, const dlong bs) {
       const dfloat delta = DELTA[n];
       const dfloat psi = PSI[n];
       if (delta / deltaMax < deltaTol) {
-        if (psi > 0.5 && farfield) PSI[n] = 1.0;
-        if (psi < 0.5 && !farfield) PSI[n] = 0.0;
+        if (psi > 0.5) PSI[n] = 1.0;
+        if (psi < 0.5) PSI[n] = 0.0;
       }
     }
   }
@@ -686,8 +686,7 @@ void rsum(dfloat *s_sum, const dlong t, const dlong bs) {
       const dfloat delta = DELTA[n];
       const dfloat psi = PSI[n];
       if (delta / deltaMax < deltaTol) {
-        if (psi > 0.5 && farfield) CURV[n] = 0.0;
-        if (psi < 0.5 && !farfield) CURV[n] = 0.0;
+        CURV[n] = 0.0;
       }
     }
   }
