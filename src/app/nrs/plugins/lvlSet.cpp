@@ -818,9 +818,9 @@ void lvlSet::setup()
   nrs->userTimeIntegrationOrder = &setTimeIntegrationOrder;
 
   // TODO: resetting EXTP order could be useful for high density cases
-  // if(nrs->fluid) { //consistent with Nek5000 - DO NOT reset pressure EXTP order
-  //   nrs->fluid->userTimeIntegrationOrder = &setTimeIntegrationOrder;
-  // }
+  if(nrs->fluid) { //consistent with Nek5000 - DO NOT reset pressure EXTP order
+    nrs->fluid->userTimeIntegrationOrder = &setTimeIntegrationOrder;
+  }
   
   if(nrs->scalar) {
     nrs->scalar->userTimeIntegrationOrder = &setTimeIntegrationOrder;
