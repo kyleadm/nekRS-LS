@@ -655,9 +655,9 @@ void rsum(dfloat *s_sum, const dlong t, const dlong bs) {
 }
 
 @kernel void clearFarField(const dlong Ntotal,
-                           const dlong farfield,
                            const dfloat deltaMax,
-                           const dfloat deltaTol,
+                           const dfloat deltaTol0,
+                           const dfloat deltaTol1,
                            @ restrict const dfloat *DELTA,
                            @ restrict dfloat *PSI)
 {
@@ -665,18 +665,18 @@ void rsum(dfloat *s_sum, const dlong t, const dlong bs) {
     if (n < Ntotal) {
       const dfloat delta = DELTA[n];
       const dfloat psi = PSI[n];
-      if (delta / deltaMax < deltaTol) {
-        if (psi > 0.5 && farfield) PSI[n] = 1.0;
-        if (psi < 0.5 && !farfield) PSI[n] = 0.0;
-      }
+      const dfloat delnorm = delta / deltaMax;
+
+      if (psi < 0.5 && delnorm < deltaTol0) PSI[n] = 0.0;
+      if (psi > 0.5 && delnorm < deltaTol1) PSI[n] = 1.0;
     }
   }
 }
 
 @kernel void clearFarFieldCurv(const dlong Ntotal,
-                               const dlong farfield,
                                const dfloat deltaMax,
-                               const dfloat deltaTol,
+                               const dfloat deltaTol0,
+                               const dfloat deltaTol1,
                                @ restrict const dfloat *PSI,
                                @ restrict const dfloat *DELTA,
                                @ restrict dfloat *CURV)
@@ -685,10 +685,10 @@ void rsum(dfloat *s_sum, const dlong t, const dlong bs) {
     if (n < Ntotal) {
       const dfloat delta = DELTA[n];
       const dfloat psi = PSI[n];
-      if (delta / deltaMax < deltaTol) {
-        if (psi > 0.5 && farfield) CURV[n] = 0.0;
-        if (psi < 0.5 && !farfield) CURV[n] = 0.0;
-      }
+      const dfloat delnorm = delta / deltaMax;
+
+      if (psi < 0.5 && delnorm < deltaTol0) CURV[n] = 0.0;
+      if (psi > 0.5 && delnorm < deltaTol1) CURV[n] = 0.0;
     }
   }
 }
