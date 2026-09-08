@@ -498,20 +498,10 @@ void fluidSolver_t::solveVelocity(double time, int stage)
         platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING GRAD CORRECTION", "TRUE") &&
         !rhoSplitDelay && !pgcDelay) {
       o_Be = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
-
-      // IMPORTANT: reconstruct with the element-local pressure gradient.
-      // The weak-gradient identity below is elementwise.  The default
-      // opSEM::strongGrad(..., avg=true) performs a gather/average at shared
-      // nodes, so it is not the gradient paired with wGradient(Pe).
-      //
-      // opSEM::strongGrad(..., avg=false) returns JW*grad(Pe), because the
-      // underlying gradientVolume kernel is mass weighted.  Divide by the
-      // local JW here so o_Be remains an ordinary physical-space gradient;
-      // solveVelocity() multiplies B_e by JW later, exactly once.
-      opSEM::strongGrad(mesh, fieldOffset, o_Pe, o_Be, false);
-      auto o_invJw = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
-      platform->linAlg->adyz(mesh->Nlocal, 1.0, mesh->o_Jw, o_invJw);
-      platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, o_invJw, o_Be);
+      // Use the same strong-gradient operator used to build the filtered
+      // Cifani split quantity in extrapolateSolution().  This preserves
+      // B_e = G(P_e) - q_e algebraically.
+      opSEM::strongGrad(mesh, fieldOffset, o_Pe, o_Be);
 
       // The existing weak pressure-gradient path is retained for its boundary
       // treatment.  Reconstruct only the algebraic B-equivalent needed there:
@@ -1188,8 +1178,21 @@ void fluidSolver_t::extrapolateSolution()
                  o_Pe);
     const bool pressureGradCorrection =
         platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING GRAD CORRECTION", "TRUE");
+    const bool pressureFilter =
+        platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING FILTER", "TRUE");
 
-    if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING FILTER", "TRUE")) {
+    // When Cifani and the Saini pressure filter are both enabled, retain the
+    // unfiltered scalar extrapolate.  The Cifani quantity q = Gp - B is
+    // extrapolated exactly as before; after that we add only the gradient of
+    // the scalar filter correction, G(Pe_filtered - Pe_unfiltered).
+    // This applies Saini's filter without component-wise filtering q.
+    occa::memory o_PeUnfiltered;
+    if (pressureFilter && pressureGradCorrection) {
+      o_PeUnfiltered = platform->deviceMemoryPool.reserve<dfloat>(fieldOffset);
+      o_Pe.copyTo(o_PeUnfiltered, fieldOffset);
+    }
+
+    if (pressureFilter) {
       int nModes = 2;
       platform->options.getArgs(upperCase(pressureName) + " RHO SPLITTING FILTER MODES", nModes);
 
@@ -1201,18 +1204,13 @@ void fluidSolver_t::extrapolateSolution()
         o_filterPe = lowPassFilterSetup(mesh, nModes, cutOff, true); // cut-off filter, C0
       }
 
-      // Standard Saini rho split: the explicit split quantity is grad(Pe),
-      // so retain the existing pressure filtering when Cifani is disabled.
-      //
-      // Cifani correction: do not filter Pe independently.  The explicit
-      // split quantity is the combined smooth gradient q = Gp - B, which is
-      // extrapolated into o_Pgce and filtered below.
-      if (!pressureGradCorrection) {
-        launchKernel("fluidSolver_t::filterPeHex3D",
-                     mesh->Nelements,
-                     o_filterPe,
-                     o_Pe);
-      }
+      // Keep the original Saini operation: filter the scalar extrapolated
+      // pressure.  For the Cifani path the corresponding gradient correction
+      // is added to q below.
+      launchKernel("fluidSolver_t::filterPeHex3D",
+                   mesh->Nelements,
+                   o_filterPe,
+                   o_Pe);
     }
 
     if (pressureGradCorrection) {
@@ -1248,15 +1246,33 @@ void fluidSolver_t::extrapolateSolution()
                      o_Pgce);
       }
 
-      if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING FILTER", "TRUE")) {
-        // Filter the actual explicit split quantity, not pressure separately,
-        // so the operation remains on the Cifani combined term Gp - B.
-        for (int fld = 0; fld < mesh->dim; ++fld) {
-          launchKernel("fluidSolver_t::filterPeHex3D",
-                       mesh->Nelements,
-                       o_filterPe,
-                       o_Pgce + fld * fieldOffset);
-        }
+      if (pressureFilter) {
+        // Add only the change introduced by filtering the scalar pressure:
+        //
+        //   q_hybrid = E(Gp - B) + G(F(Ep) - E p)
+        //            = G(F(Ep)) - E(B)
+        //
+        // Thus the Saini filter remains a scalar-pressure filter, while the
+        // Cifani jump subtraction is retained.  In particular, do NOT filter
+        // o_Pgce component-by-component: that can introduce a solenoidal
+        // component into the explicit vector correction.
+        auto o_deltaPe = platform->deviceMemoryPool.reserve<dfloat>(fieldOffset);
+        platform->linAlg->axpbyz(mesh->Nlocal,
+                                 1.0,
+                                 o_Pe,
+                                 -1.0,
+                                 o_PeUnfiltered,
+                                 o_deltaPe);
+
+        auto o_deltaPeGrad = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+        opSEM::strongGrad(mesh, fieldOffset, o_deltaPe, o_deltaPeGrad);
+        platform->linAlg->axpbyMany(mesh->Nlocal,
+                                    mesh->dim,
+                                    fieldOffset,
+                                    1.0,
+                                    o_deltaPeGrad,
+                                    1.0,
+                                    o_Pgce);
       }
 
       //lag here else history is wrong
