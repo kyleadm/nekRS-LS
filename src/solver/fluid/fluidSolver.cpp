@@ -498,7 +498,20 @@ void fluidSolver_t::solveVelocity(double time, int stage)
         platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING GRAD CORRECTION", "TRUE") &&
         !rhoSplitDelay && !pgcDelay) {
       o_Be = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
-      opSEM::strongGrad(mesh, fieldOffset, o_Pe, o_Be);
+
+      // IMPORTANT: reconstruct with the element-local pressure gradient.
+      // The weak-gradient identity below is elementwise.  The default
+      // opSEM::strongGrad(..., avg=true) performs a gather/average at shared
+      // nodes, so it is not the gradient paired with wGradient(Pe).
+      //
+      // opSEM::strongGrad(..., avg=false) returns JW*grad(Pe), because the
+      // underlying gradientVolume kernel is mass weighted.  Divide by the
+      // local JW here so o_Be remains an ordinary physical-space gradient;
+      // solveVelocity() multiplies B_e by JW later, exactly once.
+      opSEM::strongGrad(mesh, fieldOffset, o_Pe, o_Be, false);
+      auto o_invJw = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
+      platform->linAlg->adyz(mesh->Nlocal, 1.0, mesh->o_Jw, o_invJw);
+      platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, o_invJw, o_Be);
 
       // The existing weak pressure-gradient path is retained for its boundary
       // treatment.  Reconstruct only the algebraic B-equivalent needed there:
