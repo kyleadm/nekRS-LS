@@ -102,6 +102,7 @@ static std::vector<std::string> lvlSetKeys = {
   {"normalaveraging"},
   {"farfieldfix"},
   {"farfieldfixtol"},
+  {"enclosedfieldfixtol"},
 };
 
 static std::vector<std::string> scalarKeys = {
@@ -487,7 +488,7 @@ void parseLvlSet(const int rank, setupAide &options, inipp::Ini *ini, std::strin
     options.setArgs("LVLSET ENCLOSEDFIELD FIX TOL", value);
   }
   else {
-    options.setArgs("LVLSET ENCLOSEDFIELD FIX TOL", "0.02");
+    options.setArgs("LVLSET ENCLOSEDFIELD FIX TOL", "0.05");
   }
 
 }
@@ -1121,7 +1122,7 @@ void lvlSet::solve(const double &fluidTime)
           setFarField();
 
           dfloat farFixTol = 0.05;
-          dfloat enclosedFixTol = 0.02;
+          dfloat enclosedFixTol = 0.05;
           platform->options.getArgs("LVLSET FARFIELD FIX TOL", farFixTol);
           platform->options.getArgs("LVLSET ENCLOSEDFIELD FIX TOL", enclosedFixTol);
           clearFarFieldKernel(mesh->Nlocal,
@@ -2354,7 +2355,7 @@ void lvlSet::applySurfaceTensionAcc(const dfloat& We, occa::memory &o_sforce)
     auto deltaMax = platform->linAlg->max(meshV->Nlocal, o_delta, platform->comm.mpiComm());
 
     dfloat farFixTol = 0.05;
-    dfloat enclosedFixTol = 0.02;
+    dfloat enclosedFixTol = 0.05;
     platform->options.getArgs("LVLSET FARFIELD FIX TOL", farFixTol);
     platform->options.getArgs("LVLSET ENCLOSEDFIELD FIX TOL", enclosedFixTol);
     //clearing curvature close to interface can be detrimental.
