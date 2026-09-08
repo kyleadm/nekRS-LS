@@ -16,7 +16,9 @@
 #include "elliptic.h"
 #include "ellipticPrecon.h"
 #include "svv.hpp"
-#include <registerKernels.hpp>
+#include "benchmarkAx.hpp"
+#include "mesh.h"
+#include "re2Reader.hpp"
 
 // private members
 namespace
@@ -168,26 +170,77 @@ void setInterfaceWidth();
 
 void setFarField();
 
-void parseLvlSetSections();
+void registerLvlSetSVVKernels()
+{
+  int N;
+  platform->options.getArgs("POLYNOMIAL DEGREE", N);
+
+  int nelgt, nelgv;
+  const std::string meshFile = platform->options.getArgs("MESH FILE");
+  re2::nelg(meshFile, false, nelgt, nelgv, platform->comm.mpiComm());
+
+  const int NelemBenchmark = nelgv / platform->comm.mpiCommSize();
+
+  const int verbosity = platform->verbose() ? 2 : 1;
+  const bool autotune = !platform->options.compareArgs("KERNEL AUTOTUNING", "FALSE");
+
+  constexpr int Nfields = 1;
+  constexpr bool stressForm = false;
+  constexpr bool poisson = false;
+  constexpr bool svv = true;
+
+  for (const bool coeffField : {true, false}) {
+    auto AxKernel = benchmarkAx<dfloat, dfloat>(
+                    NelemBenchmark,
+                    N + 1,
+                    N,
+                    !coeffField,
+                    poisson,
+                    false,
+                    svv,
+                    Nfields,
+                    stressForm,
+                    verbosity,
+                    targetTimeBenchmark,
+                    autotune);
+
+    if (platform->options.compareArgs("BUILD ONLY", "FALSE")) {
+      std::string kernelName = "svv-ellipticPartialAx";
+
+      if (coeffField) {
+        kernelName += "Var";
+      }
+
+      kernelName += "Coeff";
+
+      if (platform->options.compareArgs("ELEMENT MAP", "TRILINEAR")) {
+        kernelName += "Trilinear";
+      }
+
+      kernelName +=
+          "Hex3D_" + std::to_string(N) + dfloatString;
+
+      platform->kernelRequests.add(kernelName, AxKernel);
+    }
+  }
+
+  //Register the SVV Jacobi diagonal kernel.
+  {
+    const std::string kernelName = "ellipticBlockBuildDiagonalHex3D";
+
+    const std::string fileName = std::string(getenv("NEKRS_KERNEL_DIR")) + "/core/elliptic/" + kernelName + ".okl";
+
+    auto properties = platform->kernelInfo + meshKernelProperties(N);
+
+    properties["defines/p_svv"] = 1;
+
+    platform->kernelRequests.add("svv-" + kernelName, fileName, properties);
+  }
+}
 
 void lvlSet::buildKernel(occa::properties _kernelInfo)
 {
-  // TODO: Temporary workaround to ensure the TLSR and CLSR solvers register the
-  // elliptic kernels they require. Currently, they may implicitly rely on the
-  // FLUID or SCALAR solvers for kernel registration, which may not include all
-  // kernels required by TLSR/CLSR.
-  {
-    // TLSR/CLSR sections have not been parsed yet; their regularization settings are needed below.
-    parseLvlSetSections();
-
-    registerEllipticKernels("tlsr",
-                            false,
-                            evalRegularization("SVV", "tlsr"));
-
-    registerEllipticKernels("clsr",
-                            false,
-                            evalRegularization("SVV", "clsr"));
-  }
+  registerLvlSetSVVKernels();
 
   auto buildKernel = [](occa::properties &kernelInfo,
                         const std::string &kernelName,
