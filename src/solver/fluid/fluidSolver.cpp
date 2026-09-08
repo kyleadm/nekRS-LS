@@ -1180,20 +1180,26 @@ void fluidSolver_t::extrapolateSolution()
       int nModes = 2;
       platform->options.getArgs(upperCase(pressureName) + " RHO SPLITTING FILTER MODES", nModes);
 
-      if(!o_filterPe.isInitialized()) {
+      if (!o_filterPe.isInitialized()) {
         bool cutOff = false;
-        if(platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING FILTER TYPE", "CUTOFF")) {
+        if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING FILTER TYPE", "CUTOFF")) {
           cutOff = true;
         }
-        o_filterPe = lowPassFilterSetup(mesh, nModes, cutOff, true); //cut-off filter, C0
+        o_filterPe = lowPassFilterSetup(mesh, nModes, cutOff, true); // cut-off filter, C0
       }
-                                                                   
-      // Retain the existing filtered pressure extrapolate for the weak
-      // pressure-gradient boundary treatment used by the velocity solve.
-      launchKernel("fluidSolver_t::filterPeHex3D",
-                   mesh->Nelements,
-                   o_filterPe,
-                   o_Pe);
+
+      // Standard Saini rho split: the explicit split quantity is grad(Pe),
+      // so retain the existing pressure filtering when Cifani is disabled.
+      //
+      // Cifani correction: do not filter Pe independently.  The explicit
+      // split quantity is the combined smooth gradient q = Gp - B, which is
+      // extrapolated into o_Pgce and filtered below.
+      if (!pressureGradCorrection) {
+        launchKernel("fluidSolver_t::filterPeHex3D",
+                     mesh->Nelements,
+                     o_filterPe,
+                     o_Pe);
+      }
     }
 
     if (pressureGradCorrection) {
