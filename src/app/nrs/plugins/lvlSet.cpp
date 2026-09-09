@@ -171,7 +171,7 @@ void setInterfaceWidth();
 
 void setFarField();
 
-void registerLvlSetSVVKernels()
+void registerLvlSetEllipticKernels()
 {
   int N;
   platform->options.getArgs("POLYNOMIAL DEGREE", N);
@@ -188,40 +188,39 @@ void registerLvlSetSVVKernels()
   constexpr int Nfields = 1;
   constexpr bool stressForm = false;
   constexpr bool poisson = false;
-  constexpr bool svv = true;
+  for (const bool svv : {true, false}) {
+    for (const bool coeffField : {true, false}) {
+      auto AxKernel = benchmarkAx<dfloat, dfloat>(
+          NelemBenchmark,
+          N + 1,
+          N,
+          !coeffField,
+          poisson,
+          false,
+          svv,
+          Nfields,
+          stressForm,
+          verbosity,
+          targetTimeBenchmark,
+          autotune);
 
-  for (const bool coeffField : {true, false}) {
-    auto AxKernel = benchmarkAx<dfloat, dfloat>(
-                    NelemBenchmark,
-                    N + 1,
-                    N,
-                    !coeffField,
-                    poisson,
-                    false,
-                    svv,
-                    Nfields,
-                    stressForm,
-                    verbosity,
-                    targetTimeBenchmark,
-                    autotune);
+      if (platform->options.compareArgs("BUILD ONLY", "FALSE")) {
+        std::string kernelName = svv ? "svv-ellipticPartialAx" : "ellipticPartialAx";
 
-    if (platform->options.compareArgs("BUILD ONLY", "FALSE")) {
-      std::string kernelName = "svv-ellipticPartialAx";
+        if (coeffField) {
+          kernelName += "Var";
+        }
 
-      if (coeffField) {
-        kernelName += "Var";
+        kernelName += "Coeff";
+
+        if (platform->options.compareArgs("ELEMENT MAP", "TRILINEAR")) {
+          kernelName += "Trilinear";
+        }
+
+        kernelName += "Hex3D_" + std::to_string(N) + dfloatString;
+
+        platform->kernelRequests.add(kernelName, AxKernel);
       }
-
-      kernelName += "Coeff";
-
-      if (platform->options.compareArgs("ELEMENT MAP", "TRILINEAR")) {
-        kernelName += "Trilinear";
-      }
-
-      kernelName +=
-          "Hex3D_" + std::to_string(N) + dfloatString;
-
-      platform->kernelRequests.add(kernelName, AxKernel);
     }
   }
 
@@ -241,7 +240,7 @@ void registerLvlSetSVVKernels()
 
 void lvlSet::buildKernel(occa::properties _kernelInfo)
 {
-  registerLvlSetSVVKernels();
+  registerLvlSetEllipticKernels();
 
   auto buildKernel = [](occa::properties &kernelInfo,
                         const std::string &kernelName,
