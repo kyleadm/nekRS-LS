@@ -563,8 +563,8 @@ void parseLvlSetSections()
     options.setArgs(parPrefix + "MESH", "FLUID");
 
     if(firstWord == "default") {
-      options.setArgs("TLSR DIFFUSIONCOEFF", to_string_f(0.0));
-      options.setArgs("CLSR DIFFUSIONCOEFF", to_string_f(0.0));
+      options.setArgs("TLSR DIFFUSIONCOEFF", to_string_f(1e-14));
+      options.setArgs("CLSR DIFFUSIONCOEFF", to_string_f(1e-14));
       options.setArgs("TLSR TRANSPORTCOEFF", to_string_f(1.0));
       options.setArgs("CLSR TRANSPORTCOEFF", to_string_f(1.0));
     }
