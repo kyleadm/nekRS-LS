@@ -20,8 +20,17 @@ interfaceWidthFactor        <float>                                    user spec
                             1.0 [D]
 
 interfaceWidthValue         <float>                                    user specified value for for interface width (\epsilon)                            
+                            -1.0 [D]                                   use interfaceWidthMesh and interfaceWidthFactor
 
 normalAveraging             true [D], false                            enables averaging of interface normals across elements
+
+farFieldFix                 true [D], false                            clear level-set values in the far field
+
+farFieldFixTol              <float>                                    tolerance used by farFieldFix
+                            0.05 [D]
+
+enclosedFieldFixTol         <float>                                    tolerance used to fix enclosed far-field regions
+                            0.05 [D]
 ----------------------------------------------------------------------------------------------------------------------
 [TLSR] / [CLSR]
 boundaryTypeMap             <bcType for ID 1>, <bcType for ID 1>, ...  boundary type for each boundary ID
@@ -41,8 +50,11 @@ distanceFactor              <dfloat>                                   scaling f
                             1.0 [D - CLSR]
 
 maximumSteps                <int>                                      user specified maximum pseudo-time iterations                            
+                            1000 [D - TLSR]
+                            500 [D - CLSR]
 
 targetCFL                   <dfloat>                                   user specified max target CFL for TLSR/CLSR
+                            0.4 [D]
 
 stoppingCondition           targetSteps[D], targetTime                 pseudo-time iteration stopping condition for TLSR/CLSR
 
@@ -52,22 +64,17 @@ regularizationFactor        <dfloat>                                   TLSR only
 boundaryFix                 true [D], false                            TLSR only                           
                                                                        apply boundary fix for TLSR
                             
-solver                      none                                       linear solver
-                                                                       see COMMON field settings in nrsman
+checkpointing               true, false [D]
 
-residualTol                 <float>                                    absolute linear solver residual tolerance 
-                            1e-8 [D]                                   see COMMON field settings in nrsman
-                            +relative=<float>                           
+regularization              svv [D]                                    TLSR: scalingCoeff=2.0, filterPower=6.0
+                                                                       CLSR: scalingCoeff=1.0, filterPower=4.0
+                            none                                       see COMMON field settings in nrsman
 
-initialGuess                previous                                   see COMMON field settings in nrsman
-                            extrapolation [D] 
+filterWeight                deprecated; not set [D]                    accepted for backward compatibility
 
-preconditioner              Jacobi [D]                                 see COMMON field settings in nrsman
+filterModes                 deprecated; not set [D]                    accepted for backward compatibility
 
-
-checkpointing               true [D], false
-
-regularization                                                         see COMMON field settings in nrsman
+filterCutoffRatio           deprecated; not set [D]                    accepted for backward compatibility
 ----------------------------------------------------------------------------------------------------------------------
 
 NOTES
