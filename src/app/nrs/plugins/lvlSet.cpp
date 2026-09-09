@@ -563,7 +563,8 @@ void parseLvlSetSections()
     options.setArgs(parPrefix + "MESH", "FLUID");
 
     if(firstWord == "default") {
-      options.setArgs("TLSR DIFFUSIONCOEFF", to_string_f(1e-12));
+      options.setArgs("TLSR DIFFUSIONCOEFF", to_string_f(0.0));
+      options.setArgs("CLSR DIFFUSIONCOEFF", to_string_f(0.0));
       options.setArgs("TLSR TRANSPORTCOEFF", to_string_f(1.0));
       options.setArgs("CLSR TRANSPORTCOEFF", to_string_f(1.0));
     }
@@ -934,12 +935,6 @@ void lvlSet_t::pseudoStepper(const double &fluidTime)
     }
     throw std::logic_error("Unhandled StopMode value");
   };
-
-  //placed here for now. find a better place for this
-  //o_diff has to be filled for the preconditioner
-  if(this->name == "clsr") {
-    platform->linAlg->fill(this->_mesh->Nlocal, interfaceWidth, this->o_diff);
-  }
 
   while(!isFinalStep()) {
     MPI_Barrier(platform->comm.mpiComm());
@@ -1356,15 +1351,7 @@ lvlSet_t::lvlSet_t(lvlSetConfig_t &cfg, const std::unique_ptr<geomSolver_t> &_ge
   }
 
   if (avmEnabled) {
-    bool avmEnabledScalar = false;
-    for (int is = 0; is < nrs->scalar->NSfields; is++) {
-      const auto sid = scalarDigitStr(is);
-
-      if (evalRegularization("AVM_AVERAGED_MODAL_DECAY", "SCALAR" + sid)) {
-        avmEnabledScalar = true;
-      }
-    }
-    if(!avmEnabledScalar) avm::setup(this->meshV);  //only initialize if not done in scalar
+    avm::setup(this->meshV);
   }
 
   if(svvEnabled) {
@@ -1700,7 +1687,16 @@ void lvlSet_t::solve(double time, int stage)
       o_lhs,
       o_rhs);
 
-  const auto o_lambda0 = this->o_diff;
+  const auto o_lambda0 = [&]() {
+    if (this->name != "clsr") {
+      return occa::memory(this->o_diff);
+    }
+
+    auto o_l = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
+    platform->linAlg->axpby(mesh->Nlocal, 1.0, this->o_diff, 0.0, o_l);
+    platform->linAlg->add(mesh->Nlocal, interfaceWidth, o_l); //only to assemble preconditioner
+    return occa::memory(o_l);
+  }();
   const auto o_lambda1 = [&]() {
     auto o_l = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
     platform->linAlg->axpby(mesh->Nlocal, *this->g0 / this->dt[0], this->o_rho, 0.0, o_l);
@@ -1998,10 +1994,6 @@ void lvlSet_t::mueAVM()
                "%s\n",
                "AVM requires polynomialOrder >= 5!");
 
-    if (!this->o_avmmu.isInitialized()) {
-      this->o_avmmu = platform->device.malloc<dfloat>(mesh->Nlocal);
-    }
-
     dfloat kappa = 1.0;
     platform->options.getArgs(parPrefix + " REGULARIZATION AVM ACTIVATION WIDTH", kappa);
 
@@ -2018,11 +2010,11 @@ void lvlSet_t::mueAVM()
 
     auto o_eps = avm::viscosity(vFieldOffset, this->o_W, this->o_S, absTol, scalingCoeff, logS0, kappa, makeCont);
 
-    this->o_avmmu.copyFrom(o_eps, mesh->Nlocal);
+    this->o_diff.copyFrom(o_eps, mesh->Nlocal);
 
     if (verbose) {
-      const dfloat maxDiff = platform->linAlg->max(mesh->Nlocal, this->o_avmmu, platform->comm.mpiComm());
-      const dfloat minDiff = platform->linAlg->min(mesh->Nlocal, this->o_avmmu, platform->comm.mpiComm());
+      const dfloat maxDiff = platform->linAlg->max(mesh->Nlocal, this->o_diff, platform->comm.mpiComm());
+      const dfloat minDiff = platform->linAlg->min(mesh->Nlocal, this->o_diff, platform->comm.mpiComm());
 
       if (platform->comm.mpiRank() == 0) {
         printf("%s now has a min/max artificial viscosity: (%f,%f)\n", this->name.c_str(), minDiff, maxDiff);
@@ -2152,7 +2144,7 @@ void lvlSet::clsrAx(elliptic_t* elliptic,
   auto& o_geom_factors = elliptic->stressForm ? mesh->o_vgeo : mesh->o_ggeo;
   auto& o_D = mesh->o_D;
   auto& o_DT = mesh->o_DT;
-  auto& o_lambda0 = elliptic->o_lambda0;
+  // auto& o_lambda0 = elliptic->o_lambda0; //not used here
   auto o_lambda1 = (elliptic->poisson) ? o_NULL : elliptic->o_lambda1;
   auto o_lambdasvv = (elliptic->svv) ? elliptic->o_lambdasvv : o_NULL;
 
@@ -2204,10 +2196,6 @@ void lvlSet::clsrAx(elliptic_t* elliptic,
   auto o_wrk = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
   platform->linAlg->fill(mesh->Nlocal, 0.0, o_wrk);
 
-  if (evalRegularization("AVM_AVERAGED_MODAL_DECAY", clsr->name)) {
-    platform->linAlg->axpby(mesh->Nlocal, 1.0, clsr->o_avmmu, 1.0, o_wrk);
-  }
-
   if (!elliptic->AxKernel.isInitialized()) elliptic->AxKernel = loadKernel(elliptic->svv);
   elliptic->AxKernel(NelementsList,
                      elliptic->fieldOffset,
@@ -2217,7 +2205,7 @@ void lvlSet::clsrAx(elliptic_t* elliptic,
                      o_D,
                      o_DT,
                      elliptic->o_svvD,
-                     o_wrk,
+                     clsr->o_diff,    //excludes interfaceWidth
                      o_lambda1,
                      o_lambdasvv,
                      o_q,

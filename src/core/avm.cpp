@@ -96,6 +96,10 @@ occa::memory baseLineDecayKlockner(int _N)
 
 void setup(mesh_t *mesh_)
 {
+  if (o_invVT.isInitialized()) {
+    return;
+  }
+
   mesh = mesh_;
   gsh = mesh->oogs;
 
