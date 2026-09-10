@@ -71,6 +71,7 @@ static double clsrTimer = 0.0;
 static double fluidStartTime = -1.0;
 
 static int timeIntegrationOrder = 1;
+static int fluidIntegrationOrder = 1;
 
 static dlong farField = 0;
 
@@ -166,6 +167,7 @@ static bool evalRegularization(const std::string regString, const std::string fi
 } // namespace
 
 void setTimeIntegrationOrder (int &order);
+void setFluidIntegrationOrder(int &order);
 
 void setInterfaceWidth();
 
@@ -878,10 +880,9 @@ void lvlSet::setup()
   //setup custom hooks
   nrs->userTimeIntegrationOrder = &setTimeIntegrationOrder;
 
-  // TODO: resetting EXTP order could be useful for high density cases
-  // if(nrs->fluid) { //consistent with Nek5000 - DO NOT reset pressure EXTP order
-  //   nrs->fluid->userTimeIntegrationOrder = &setTimeIntegrationOrder;
-  // }
+  if(nrs->fluid) {
+    nrs->fluid->userTimeIntegrationOrder = &setFluidIntegrationOrder;
+  }
   
   if(nrs->scalar) {
     nrs->scalar->userTimeIntegrationOrder = &setTimeIntegrationOrder;
@@ -1092,6 +1093,7 @@ void lvlSet::solve(const double &fluidTime)
   const double totalTime = fluidTime - fluidStartTime + 1e-12;
 
   bool resetOrder = false;
+  bool resetFluidOrder = false;
 
   auto runPseudoStepper = [&] (auto &ls, double &timer, const std::string& scalarName) {
     if(platform->options.compareArgs(upperCase(ls->name) + " SOLVER", "NONE"))
@@ -1157,6 +1159,7 @@ void lvlSet::solve(const double &fluidTime)
       }
       ls->pseudoStepper(fluidTime);
       resetOrder = true;
+      if(ls->name == "tlsr") resetFluidOrder = true;
     }
   };
   runPseudoStepper(tlsr, tlsrTimer, "cls");
@@ -1171,6 +1174,12 @@ void lvlSet::solve(const double &fluidTime)
     timeIntegrationOrder = 1;
   } else {
     timeIntegrationOrder++;
+  }
+
+  if(resetFluidOrder) {
+    fluidIntegrationOrder = 1;
+  } else {
+    fluidIntegrationOrder++;
   }
 }
 
@@ -2291,6 +2300,11 @@ void lvlSet::initHeaviside(const occa::memory& o_phi, occa::memory& o_psi, const
 void setTimeIntegrationOrder(int &order) 
 {
   order = std::min(timeIntegrationOrder, order);
+}
+
+void setFluidIntegrationOrder(int &order)
+{
+  order = std::min(fluidIntegrationOrder, order);
 }
 
 const occa::memory& lvlSet::getDeltaFunction()
