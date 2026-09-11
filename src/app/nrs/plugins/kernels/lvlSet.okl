@@ -384,11 +384,18 @@ void rsum(dfloat *s_sum, const dlong t, const dlong bs) {
 {
   for (dlong n = 0; n < Ntotal; ++n; @tile(p_blockSize, @outer, @inner)) {
     if (n < Ntotal) {
-      dfloat psi = 2.0 * PSI[n] - 1.0;
-      psi = fmax(-1.0, fmin(1.0, psi));
+      // Saini CLS field: psi=1 in the liquid and psi=0 in the gas.
+      // Clamp psi consistently with the material-property evaluation.
+      const dfloat psi = fmax(0.0, fmin(1.0, PSI[n]));
+      const dfloat phi = 2.0 * psi - 1.0;
 
+      // Standard Saini diffuse delta, Eq. (53), written in terms of CLS.
       const dfloat ieps = 0.25 / eps;
-      delta[n] = ieps * (1.0 - psi * psi);
+      const dfloat deltaStandard = ieps * (1.0 - phi * phi);
+
+      // Yokoi density scaling: delta_scaling = 2 H delta.
+      // For the Saini formulation, H is the CLS field psi.
+      delta[n] = 2.0 * psi * deltaStandard;
     }
   }
 }
