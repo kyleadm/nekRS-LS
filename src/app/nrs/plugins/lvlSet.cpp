@@ -592,6 +592,7 @@ void parseLvlSetSections()
       std::string value;
       if (ini->extract(parScope, "maximumSteps", value)) {
         options.setArgs(parPrefix + "MAXIMUM STEPS", value);
+        options.setArgs(parPrefix + "STOPPING CONDITION", "TARGETSTEPS");
       }
     }
 
@@ -608,8 +609,8 @@ void parseLvlSetSections()
     }
 
     if(firstWord == "default") {
-      options.setArgs("TLSR STOPPING CONDITION", "TARGETSTEPS");
-      options.setArgs("CLSR STOPPING CONDITION", "TARGETSTEPS");
+      options.setArgs("TLSR STOPPING CONDITION", "TARGETTIME");
+      options.setArgs("CLSR STOPPING CONDITION", "TARGETTIME");
     }
 
     {
@@ -724,7 +725,12 @@ void parseLvlSetSections()
       for (int i = 0; i < list.size(); i++) {
         if (i > 0) 
           s_newMap = s_newMap + ", ";
-        s_newMap = s_newMap + "zeroNeumann";
+        if(list[i] == "none") {
+          s_newMap = s_newMap + "none";
+        }
+        else {
+          s_newMap = s_newMap + "zeroNeumann";
+        }
       }
 
       options.setArgs("TLSR BOUNDARY TYPE MAP", s_newMap);
@@ -740,7 +746,7 @@ void parseLvlSetSections()
       for (int i = 0; i < list.size(); i++) {
         if (i > 0) 
           s_newMap = s_newMap + ", ";
-        if(list[i] == "inlet" || list[i] == "v" || list[i] == "udfdirichlet") {
+        if(list[i] == "none" || list[i] == "inlet" || list[i] == "v" || list[i] == "udfdirichlet") {
           s_newMap = s_newMap + list[i];
         } 
         else {
