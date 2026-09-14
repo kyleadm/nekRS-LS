@@ -94,6 +94,16 @@ fluidSolver_t::fluidSolver_t(const fluidSolverCfg_t &cfg, const std::unique_ptr<
       }
       platform->options.getArgs(key, rhoSplitDelay);
     }
+
+    if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING GRAD CORRECTION", "TRUE")) {
+      // Store B at the same pressure-history levels used by EXTP.  The
+      // extrapolated buffer stores the combined Cifani quantity (Gp - B).
+      o_Pgc = platform->device.malloc<dfloat>(fieldOffsetSum * o_coeffEXTP.size());
+      platform->linAlg->fill(o_Pgc.size(), 0.0, o_Pgc);
+      pgcDelay = 10;
+      o_Pgce = platform->device.malloc<dfloat>(fieldOffsetSum);
+      platform->linAlg->fill(o_Pgce.size(), 0.0, o_Pgce);
+    }
   }
   o_P = platform->device.malloc<dfloat>(fieldOffset * std::max(static_cast<int>(o_coeffEXTP.size()), 1));
 
@@ -199,10 +209,26 @@ void fluidSolver_t::solvePressure(double time, int stage)
 
       o_del = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
 
-      const auto valSave = ellipticSolverP->options().getArgs("ELLIPTIC COEFF FIELD");
-      ellipticSolverP->options().setArgs("ELLIPTIC COEFF FIELD", "TRUE");
-      ellipticSolverP->Ax(o_lambda, o_NULL, o_Pe, o_del);
-      ellipticSolverP->options().setArgs("ELLIPTIC COEFF FIELD", valSave);
+      if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING GRAD CORRECTION", "TRUE") &&
+          !pgcDelay) {
+        // Cifani Eq. (34): apply the variable-density split to a single
+        // extrapolation of the smooth, jump-corrected term (Gp - B).
+        auto o_qe = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+        o_Pgce.copyTo(o_qe, fieldOffsetSum);
+        platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, o_lambda, o_qe);
+        launchKernel("core-wDivergenceVolumeHex3D",
+                     mesh->Nelements,
+                     mesh->o_vgeo,
+                     mesh->o_D,
+                     fieldOffset,
+                     o_qe,
+                     o_del);
+      } else {
+        const auto valSave = ellipticSolverP->options().getArgs("ELLIPTIC COEFF FIELD");
+        ellipticSolverP->options().setArgs("ELLIPTIC COEFF FIELD", "TRUE");
+        ellipticSolverP->Ax(o_lambda, o_NULL, o_Pe, o_del);
+        ellipticSolverP->options().setArgs("ELLIPTIC COEFF FIELD", valSave);
+      }
     }
     return o_del;
   }();
@@ -303,6 +329,18 @@ void fluidSolver_t::solvePressure(double time, int stage)
 #else
     o_rhs.copyFrom(this->o_JwF);
 #endif
+
+    if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING", "TRUE") &&
+        platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING GRAD CORRECTION", "TRUE")) {
+      // Known B^{n+1}/rho_c contribution from the Cifani split.  During the
+      // one-step reset fallback retain the unsplit 1/rho weighting.
+      auto o_temp = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+      o_Pgc.copyTo(o_temp, fieldOffsetSum);
+      auto o_lam = pgcDelay ? o_lambda0(true) : o_lambda0(false);
+      platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, o_lam, o_temp);
+      platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, mesh->o_Jw, o_temp);
+      platform->linAlg->axpbyMany(mesh->Nlocal, mesh->dim, fieldOffset, 1.0, o_temp, 1.0, o_rhs);
+    }
 
     oogs::startFinish(o_rhs, mesh->dim, fieldOffset, ogsDfloat, ogsAdd, mesh->oogs3);
     platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, mesh->o_invLMM, o_rhs);
@@ -417,6 +455,21 @@ void fluidSolver_t::solveVelocity(double time, int stage)
     return o_gradMueDiv;
   }();
 
+  const auto o_Be = [&]() {
+    occa::memory o_Be;
+    if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING", "TRUE") &&
+        platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING GRAD CORRECTION", "TRUE") &&
+        !rhoSplitDelay && !pgcDelay) {
+      o_Be = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+      opSEM::strongGrad(mesh, fieldOffset, o_Pe, o_Be);
+
+      // Reconstruct the B-equivalent required by the existing weak pressure
+      // gradient path: B_e = Gp_e - extrapolated(Gp-B).
+      platform->linAlg->axpbyMany(mesh->Nlocal, mesh->dim, fieldOffset, -1.0, o_Pgce, 1.0, o_Be);
+    }
+    return o_Be;
+  }();
+
   const auto o_rhoSplitTerm = [&]() {
     occa::memory o_del;
     if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING", "TRUE") && !rhoSplitDelay) {
@@ -431,6 +484,16 @@ void fluidSolver_t::solveVelocity(double time, int stage)
                    fieldOffset,
                    o_delta,
                    o_del);
+
+      if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING GRAD CORRECTION", "TRUE") &&
+          !pgcDelay) {
+        auto o_temp = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+        o_Pgc.copyTo(o_temp, fieldOffsetSum);
+        // G(P-Pe) - (B-Be) = (Gp-B) - extrapolated(Gp-B), Cifani Eq. (35).
+        platform->linAlg->axpbyMany(mesh->Nlocal, mesh->dim, fieldOffset, -1.0, o_Be, 1.0, o_temp);
+        platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, mesh->o_Jw, o_temp);
+        platform->linAlg->axpbyMany(mesh->Nlocal, mesh->dim, fieldOffset, -1.0, o_temp, 1.0, o_del);
+      }
       // o_del * rho / rho0
       platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1 / rho0, o_rho, o_del);
       flopCount += static_cast<double>(mesh->Nelements) * (6 * mesh->Np * mesh->Nq + 18 * mesh->Np);
@@ -466,6 +529,17 @@ void fluidSolver_t::solveVelocity(double time, int stage)
     platform->linAlg->scale(o_gradP.size(), -1.0, o_gradP);
 #endif
     flopCount += static_cast<double>(mesh->Nelements) * 18 * (mesh->Np * mesh->Nq + mesh->Np);
+
+    if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING", "TRUE") &&
+        platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING GRAD CORRECTION", "TRUE")) {
+      // Preserve the weak pressure-gradient boundary treatment while adding
+      // the B term consistent with the single combined extrapolation.
+      auto o_B = (rhoSplitDelay || pgcDelay) ? o_Pgc : o_Be;
+      auto o_JwB = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+      o_B.copyTo(o_JwB, fieldOffsetSum);
+      platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, mesh->o_Jw, o_JwB);
+      platform->linAlg->axpbyMany(mesh->Nlocal, mesh->dim, fieldOffset, 1.0, o_JwB, 1.0, o_gradP);
+    }
 
     return o_gradP;
   }();
@@ -552,6 +626,10 @@ void fluidSolver_t::solveVelocity(double time, int stage)
 
   if(stage == 1 && platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING", "TRUE")) {
     rhoSplitDelay = std::max(rhoSplitDelay - 1, 0);
+  }
+  if(stage == 1 &&
+     platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING GRAD CORRECTION", "TRUE")) {
+    pgcDelay = std::max(pgcDelay - 1, 0);
   }
 
   if (platform->verbose()) {
@@ -1039,7 +1117,78 @@ void fluidSolver_t::extrapolateSolution()
                    o_filterPe,
                    o_Pe);
     }
+
+    if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING GRAD CORRECTION", "TRUE")) {
+      const int nEXT = o_coeffEXTP.size();
+      auto o_qHistory = platform->deviceMemoryPool.reserve<dfloat>(nEXT * fieldOffsetSum);
+
+      for (int s = 0; s < nEXT; ++s) {
+        auto o_p = o_P.slice(s * fieldOffset, mesh->Nlocal);
+        auto o_B = o_Pgc.slice(s * fieldOffsetSum, fieldOffsetSum);
+        auto o_q = o_qHistory.slice(s * fieldOffsetSum, fieldOffsetSum);
+
+        // Cifani Eq. (32): build q = Gp - B at each history level and apply
+        // EXTP once to the combined, jump-corrected quantity.
+        opSEM::strongGrad(mesh, fieldOffset, o_p, o_q);
+        platform->linAlg->axpbyMany(mesh->Nlocal, mesh->dim, fieldOffset, -1.0, o_B, 1.0, o_q);
+      }
+
+      if (pgcCombinedHistoryReset && !pgcDelay) {
+        // Restart from q^n after TLSR changes the interface geometry.
+        o_qHistory.copyTo(o_Pgce, fieldOffsetSum);
+        pgcCombinedHistoryReset = false;
+      } else {
+        launchKernel("core-extrapolate",
+                     mesh->Nlocal,
+                     mesh->dim,
+                     nEXT,
+                     fieldOffset,
+                     o_coeffEXTP,
+                     o_qHistory,
+                     o_Pgce);
+      }
+
+      if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING FILTER", "TRUE")) {
+        // Filter the explicit split quantity itself, not pressure separately.
+        for (int fld = 0; fld < mesh->dim; ++fld) {
+          launchKernel("fluidSolver_t::filterPeHex3D",
+                       mesh->Nelements,
+                       o_filterPe,
+                       o_Pgce + fld * fieldOffset);
+        }
+      }
+
+      // Lag B here so slot 0 remains the current value supplied by lvlSet.
+      for (int s = nEXT; s > 1; --s) {
+        o_Pgc.copyFrom(o_Pgc, fieldOffsetSum, (s - 1) * fieldOffsetSum, (s - 2) * fieldOffsetSum);
+      }
+    }
   }
+}
+
+void fluidSolver_t::requestPressureGradientCorrectionHistoryReset()
+{
+  if (!o_Pgc.isInitialized()) {
+    return;
+  }
+
+  pgcHistoryResetPending = true;
+  pgcDelay = std::max(pgcDelay, 1);
+}
+
+void fluidSolver_t::commitPressureGradientCorrectionHistoryReset()
+{
+  if (!pgcHistoryResetPending || !o_Pgc.isInitialized()) {
+    return;
+  }
+
+  const int nEXT = o_coeffEXTP.size();
+  for (int s = 1; s < nEXT; ++s) {
+    o_Pgc.copyFrom(o_Pgc, fieldOffsetSum, s * fieldOffsetSum, 0);
+  }
+
+  pgcHistoryResetPending = false;
+  pgcCombinedHistoryReset = true;
 }
 
 void fluidSolver_t::lagSolution()

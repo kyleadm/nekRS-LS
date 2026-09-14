@@ -104,6 +104,7 @@ static std::vector<std::string> lvlSetKeys = {
   {"farfieldfix"},
   {"farfieldfixtol"},
   {"enclosedfieldfixtol"},
+  {"yokoidensityscaling"},
 };
 
 static std::vector<std::string> scalarKeys = {
@@ -490,6 +491,20 @@ void parseLvlSet(const int rank, setupAide &options, inipp::Ini *ini, std::strin
   }
   else {
     options.setArgs("LVLSET ENCLOSEDFIELD FIX TOL", "0.05");
+  }
+
+  if (ini->extract(parSection, "yokoiDensityScaling", value)) {
+    const std::vector<std::string> validValues = {
+      {"true"},
+      {"false"},
+    };
+    checkValidity(rank, validValues, value);
+    options.setArgs("LVLSET YOKOI DENSITY SCALING", upperCase(value));
+  }
+  else if(options.getArgs("LVLSET YOKOI DENSITY SCALING").empty()) {
+    // Keep the current/non-Yokoi surface-tension formulation unless explicitly requested.
+    // The emptiness check preserves an option set from UDF_Setup0.
+    options.setArgs("LVLSET YOKOI DENSITY SCALING", "FALSE");
   }
 
 }
@@ -1164,6 +1179,13 @@ void lvlSet::solve(const double &fluidTime)
         svv::convoluteDerivative(mesh, o_filterPower, o_svvD);
       }
       ls->pseudoStepper(fluidTime);
+
+      if (ls->name == "tlsr" && nrs->fluid) {
+        // TLSR changes the normals/curvature entering B in Cifani Eq. (32).
+        // Invalidate the old correction history; applyPressureGradCorrection
+        // commits the rebuilt post-TLSR B after the geometry is updated.
+        nrs->fluid->requestPressureGradientCorrectionHistoryReset();
+      }
       resetOrder = true;
       if(ls->name == "tlsr") resetFluidOrder = true;
     }
@@ -2344,6 +2366,89 @@ const occa::memory& lvlSet::getCurvature(const occa::memory& o_normals)
   return o_curvature;
 }
 
+void lvlSet::applyPressureGradCorrection(const dfloat& We, occa::memory &o_sforce)
+{
+  const bool cifaniEnabled =
+      platform->options.compareArgs("FLUID PRESSURE RHO SPLITTING", "TRUE") &&
+      platform->options.compareArgs("FLUID PRESSURE RHO SPLITTING GRAD CORRECTION", "TRUE");
+  if(!cifaniEnabled)
+    return;
+
+  auto meshV = nrs->fluid->mesh;
+
+  auto o_phi = nrs->scalar->o_solution("tls");
+  bool avg = false;
+  if(platform->options.compareArgs("LVLSET NORMAL AVERAGING", "TRUE")) {
+    avg = true;
+  }
+
+  auto o_normal = platform->deviceMemoryPool.reserve<dfloat>(nrs->fluid->fieldOffsetSum);
+  lvlSet::normalVector(o_phi, o_normal, avg);
+
+  auto o_curvature = lvlSet::getCurvature(o_normal);
+  if(platform->options.compareArgs("LVLSET FARFIELD FIX", "TRUE")) {
+    auto o_delta = lvlSet::getDeltaFunction();
+    auto deltaMax = platform->linAlg->max(meshV->Nlocal, o_delta, platform->comm.mpiComm());
+
+    dfloat farFixTol = 0.05;
+    dfloat enclosedFixTol = 0.05;
+    platform->options.getArgs("LVLSET FARFIELD FIX TOL", farFixTol);
+    platform->options.getArgs("LVLSET ENCLOSEDFIELD FIX TOL", enclosedFixTol);
+    farFixTol *= 0.1;
+    enclosedFixTol *= 0.1;
+
+    clearFarFieldCurvKernel(meshV->Nlocal,
+                            deltaMax,
+                            (!farField) ? farFixTol : enclosedFixTol,
+                            farField ? farFixTol : enclosedFixTol,
+                            nrs->scalar->o_solution("cls"),
+                            o_delta,
+                            o_curvature);
+  }
+
+  auto o_psi = nrs->scalar->o_solution("cls");
+
+  // Cifani Eq. (32): B = (kappa/We) G f.  With Yokoi density scaling enabled
+  // for this CLS convention (psi=1 liquid, psi=0 gas), use f = psi^2 so that
+  // Gf = 2 psi Gpsi.  The same strong G is used as for pressure in both modes.
+  if(platform->options.compareArgs("LVLSET YOKOI DENSITY SCALING", "TRUE")) {
+    auto o_psiScaling = platform->deviceMemoryPool.reserve<dfloat>(meshV->Nlocal);
+    o_psi.copyTo(o_psiScaling, meshV->Nlocal);
+    platform->linAlg->axmy(meshV->Nlocal, 1.0, o_psi, o_psiScaling); // psi^2
+    opSEM::strongGrad(meshV, nrs->fluid->fieldOffset, o_psiScaling, o_sforce);
+  } else {
+    opSEM::strongGrad(meshV, nrs->fluid->fieldOffset, o_psi, o_sforce);
+  }
+
+  platform->linAlg->axmyVector(meshV->Nlocal,
+                              nrs->fluid->fieldOffset,
+                              0,
+                              -1.0/We, // reverse sign (see Nek5000)
+                              o_curvature,
+                              o_sforce);
+
+  nrs->fluid->commitPressureGradientCorrectionHistoryReset();
+}
+
+void lvlSet::addSurfaceTensionAcc(const dfloat& We, occa::memory &o_sforceAcc)
+{
+  const bool cifaniEnabled =
+      platform->options.compareArgs("FLUID PRESSURE RHO SPLITTING", "TRUE") &&
+      platform->options.compareArgs("FLUID PRESSURE RHO SPLITTING GRAD CORRECTION", "TRUE");
+  if(cifaniEnabled)
+    return;
+
+  auto o_sforce = platform->deviceMemoryPool.reserve<dfloat>(nrs->fluid->fieldOffsetSum);
+  lvlSet::applySurfaceTensionAcc(We, o_sforce);
+  platform->linAlg->axpbyMany(nrs->scalar->meshV->Nlocal,
+                              nrs->scalar->meshV->dim,
+                              nrs->fluid->fieldOffset,
+                              1.0,
+                              o_sforce,
+                              1.0,
+                              o_sforceAcc);
+}
+
 void lvlSet::applySurfaceTensionAcc(const dfloat& We, occa::memory &o_sforce)
 {
   auto meshV = nrs->scalar->meshV;
@@ -2380,6 +2485,14 @@ void lvlSet::applySurfaceTensionAcc(const dfloat& We, occa::memory &o_sforce)
                             o_curvDeltabyRho);
   }
   platform->linAlg->axmy(meshV->Nlocal, 1.0, o_delta, o_curvDeltabyRho);
+
+  // Optional Yokoi density scaling.  For psi=1 in the liquid and psi=0 in
+  // the gas, delta_scaled = 2 psi delta.  When disabled this is exactly the
+  // pre-Yokoi/current explicit CSF path.
+  if(platform->options.compareArgs("LVLSET YOKOI DENSITY SCALING", "TRUE")) {
+    auto o_psi = nrs->scalar->o_solution("cls");
+    platform->linAlg->axmy(meshV->Nlocal, 2.0, o_psi, o_curvDeltabyRho);
+  }
 
   //Divide by density
   auto o_rho = nrs->fluid->o_prop + 1 * nrs->fluid->fieldOffset;
