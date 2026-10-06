@@ -954,6 +954,12 @@ void lvlSet_t::pseudoStepper(const double &fluidTime)
   dt[1] = 0.0;
   dt[2] = 0.0;
 
+  // Freeze the TLSR sign field at the initial pseudo-time state.
+  // Normals are still recomputed as phi evolves.
+  if(this->name == "tlsr") {
+    lvlSet::getSignField(this->o_S);
+  }
+
   // Integration loop stopping condition
   auto isFinalStep = [&]() -> bool {
     switch (stopMode) {
@@ -1490,9 +1496,8 @@ void lvlSet_t::computeAdvectionCoeff(int tstep)
 
     lvlSet::normalVector(o_phi, this->o_W, avg);
 
-    auto o_sign = lvlSet::getSignField(o_phi);
-  
-    platform->linAlg->axmyVector(meshV->Nlocal, this->vFieldOffset, 0, 1.0, o_sign, this->o_W);
+    // Reuse the sign field frozen at the start of pseudoStepper().
+    platform->linAlg->axmyVector(meshV->Nlocal, this->vFieldOffset, 0, 1.0, o_signls, this->o_W);
 
     if(platform->options.compareArgs("TLSR BOUNDARY FIX", "TRUE")) {
       tlsrBoundaryFixKernel(meshV->Nelements,
