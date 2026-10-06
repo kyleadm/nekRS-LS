@@ -954,6 +954,10 @@ void lvlSet_t::pseudoStepper(const double &fluidTime)
   dt[1] = 0.0;
   dt[2] = 0.0;
 
+  if(this->name == "tlsr") {
+    lvlSet::getSignField(this->o_S);
+  }
+
   // Integration loop stopping condition
   auto isFinalStep = [&]() -> bool {
     switch (stopMode) {
@@ -1488,11 +1492,14 @@ void lvlSet_t::computeAdvectionCoeff(int tstep)
     auto o_phi = this->o_S;
     auto meshV = this->meshV;
 
+    // The sign field can either remain frozen or be updated at each pseudo-step.
+    if(platform->options.compareArgs("TLSR FROZEN SIGN", "FALSE")) {
+      lvlSet::getSignField(o_phi);
+    }
+
     lvlSet::normalVector(o_phi, this->o_W, avg);
 
-    auto o_sign = lvlSet::getSignField(o_phi);
-  
-    platform->linAlg->axmyVector(meshV->Nlocal, this->vFieldOffset, 0, 1.0, o_sign, this->o_W);
+    platform->linAlg->axmyVector(meshV->Nlocal, this->vFieldOffset, 0, 1.0, o_signls, this->o_W);
 
     if(platform->options.compareArgs("TLSR BOUNDARY FIX", "TRUE")) {
       tlsrBoundaryFixKernel(meshV->Nelements,
