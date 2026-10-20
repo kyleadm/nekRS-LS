@@ -207,10 +207,9 @@ void fluidSolver_t::solvePressure(double time, int stage)
     return o_del;
   }();
 
-  /*
   const auto o_rhoSplitSurfaceTerm = [&]() {
     occa::memory o_flux;
-    if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING", "TRUE")) {
+    if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING", "TRUE") && !rhoSplitDelay) {
       // 1/rho - 1/rho0
       auto o_lambda = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
       platform->linAlg->adyz(mesh->Nlocal, 1.0, o_rho, o_lambda);
@@ -236,7 +235,6 @@ void fluidSolver_t::solvePressure(double time, int stage)
     }
     return o_flux;
   }(); 
-  */
 
   const auto o_stressTerm = [&]() {
     auto o_curl = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
@@ -341,9 +339,9 @@ void fluidSolver_t::solvePressure(double time, int stage)
       platform->linAlg->axpby(mesh->Nlocal, -1.0, o_rhoSplitTerm, 1.0, o_pRhs);
     }
     //TODO: test if this is needed
-    // if (o_rhoSplitSurfaceTerm.isInitialized()) {
-    //  platform->linAlg->axpby(mesh->Nlocal, -1.0, o_rhoSplitSurfaceTerm, 1.0, o_pRhs);
-    //}
+    if (o_rhoSplitSurfaceTerm.isInitialized()) {
+      platform->linAlg->axpby(mesh->Nlocal, -1.0, o_rhoSplitSurfaceTerm, 1.0, o_pRhs);
+    }
 
     return o_pRhs;
   }();
