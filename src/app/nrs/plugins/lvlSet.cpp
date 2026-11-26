@@ -27,6 +27,7 @@ static std::ostringstream errorLogger;
 static std::ostringstream valueErrorLogger;
 nrs_t *nrs;
 occa::kernel signlsKernel;
+occa::kernel maskCLSBandFieldKernel;
 occa::kernel normalVectorKernel;
 occa::kernel meshScalesKernel;
 occa::kernel normalizeVectorKernel;
@@ -58,7 +59,7 @@ static double elapsedTime;
 
 static dfloat dt[3] = {0.0, 0.0, 0.0};
 
-enum class StopMode {targetSteps, targetTime};
+enum class StopMode {targetSteps, targetTime, targetDistance};
 StopMode stopMode;
 
 static dfloat maxMeshScale;
@@ -112,6 +113,8 @@ static std::vector<std::string> scalarKeys = {
   {"absolutetol"},
   {"solvefrequency"},
   {"distancefactor"},
+  {"distancevelocity"},
+  {"distanceregion"},
   {"regularizationfactor"},
   {"boundaryfix"},
   {"maximumsteps"},
@@ -271,6 +274,7 @@ void lvlSet::buildKernel(occa::properties _kernelInfo)
     std::string oklFile = "lvlSet";
 
     signlsKernel = buildKernel(kernelInfo, "signls", oklPath, oklFile);
+    maskCLSBandFieldKernel = buildKernel(kernelInfo, "maskCLSBandField", oklPath, oklFile);
     normalVectorKernel = buildKernel(kernelInfo, "normalVector", oklPath, oklFile);
     meshScalesKernel = buildKernel(kernelInfo, "meshScales", oklPath, oklFile);
     normalizeVectorKernel = buildKernel(kernelInfo, "normalizeVector", oklPath, oklFile);
@@ -631,9 +635,42 @@ void parseLvlSetSections()
         const std::vector<std::string> validValues = {
           {"targetsteps"},
           {"targettime"},
+          {"targetdistance"},
         };
         checkValidity(rank, validValues, value);
         options.setArgs(parPrefix + "STOPPING CONDITION", upperCase(value));
+      }
+    }
+
+    if(firstWord == "default") {
+      options.setArgs("TLSR DISTANCE VELOCITY", "MAX");
+      options.setArgs("CLSR DISTANCE VELOCITY", "MAX");
+    }
+
+    {
+      std::string value;
+      if (ini->extract(parScope, "distanceVelocity", value)) {
+        const std::vector<std::string> validValues = {
+          {"min"}, {"mean"}, {"max"},
+        };
+        checkValidity(rank, validValues, value);
+        options.setArgs(parPrefix + "DISTANCE VELOCITY", upperCase(value));
+      }
+    }
+
+    if(firstWord == "default") {
+      options.setArgs("TLSR DISTANCE REGION", "GLOBAL");
+      options.setArgs("CLSR DISTANCE REGION", "GLOBAL");
+    }
+
+    {
+      std::string value;
+      if (ini->extract(parScope, "distanceRegion", value)) {
+        const std::vector<std::string> validValues = {
+          {"global"}, {"clsband"},
+        };
+        checkValidity(rank, validValues, value);
+        options.setArgs(parPrefix + "DISTANCE REGION", upperCase(value));
       }
     }
 
@@ -940,6 +977,8 @@ void lvlSet_t::pseudoStepper(const double &fluidTime)
       stopMode = StopMode::targetSteps;
     } else if (stopModeStr == "TARGETTIME") {
       stopMode = StopMode::targetTime;
+    } else if (stopModeStr == "TARGETDISTANCE") {
+      stopMode = StopMode::targetDistance;
     } else {
       nekrsCheck(true, platform->comm.mpiComm(), EXIT_FAILURE,
           "Unknown STOPPING CONDITION: %s\n", stopModeStr.c_str());
@@ -950,6 +989,54 @@ void lvlSet_t::pseudoStepper(const double &fluidTime)
   double time = 0.0;
   int tstep = 1;
   auto params = this->computeFixedDistanceAdvectionParams();
+
+  // In TARGETDISTANCE, distanceFactor specifies a velocity-statistic-based
+  // travel budget in units of maxMeshScale. MAX bounds the global propagation;
+  // MEAN and MIN do not bound the fastest local characteristics.
+  double distanceTravelled = 0.0;
+  const double targetDistance = maxMeshScale * this->distanceFactor;
+  std::string distanceVelocity = "MAX";
+  std::string distanceRegion = "GLOBAL";
+  if (stopMode == StopMode::targetDistance) {
+    platform->options.getArgs(upperCase(this->name) + " DISTANCE VELOCITY", distanceVelocity);
+    platform->options.getArgs(upperCase(this->name) + " DISTANCE REGION", distanceRegion);
+    nekrsCheck(targetDistance <= 0.0, platform->comm.mpiComm(), EXIT_FAILURE,
+               "%s TARGETDISTANCE requires a positive distanceFactor\n", upperCase(this->name).c_str());
+    nekrsCheck(distanceVelocity != "MIN" && distanceVelocity != "MEAN" && distanceVelocity != "MAX",
+               platform->comm.mpiComm(), EXIT_FAILURE,
+               "%s DISTANCE VELOCITY must be MIN, MEAN or MAX\n", upperCase(this->name).c_str());
+    nekrsCheck(distanceRegion != "GLOBAL" && distanceRegion != "CLSBAND",
+               platform->comm.mpiComm(), EXIT_FAILURE,
+               "%s DISTANCE REGION must be GLOBAL or CLSBAND\n", upperCase(this->name).c_str());
+  }
+
+  // CLS is fixed during this pseudo-time solve. Build its interface band
+  // once and reuse it to sample the evolving TLSR characteristic velocity.
+  constexpr dfloat clsBandLower = 0.005;
+  constexpr dfloat clsBandUpper = 0.995;
+  const bool useCLSBand = (stopMode == StopMode::targetDistance && distanceRegion == "CLSBAND");
+  occa::memory o_speed;
+  occa::memory o_maskedSpeed;
+  occa::memory o_bandWeights;
+  occa::memory o_cls;
+  double clsBandVolume = 0.0;
+
+  if (stopMode == StopMode::targetDistance) {
+    o_speed = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
+    if (useCLSBand) {
+      o_cls = nrs->scalar->o_solution("cls");
+      o_maskedSpeed = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
+      o_bandWeights = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
+      maskCLSBandFieldKernel(mesh->Nlocal, clsBandLower, clsBandUpper,
+                             0.0, o_cls, mesh->o_LMM, o_bandWeights);
+      clsBandVolume = platform->linAlg->sum(mesh->Nlocal, o_bandWeights,
+                                             platform->comm.mpiComm());
+      nekrsCheck(clsBandVolume <= 0.0, platform->comm.mpiComm(), EXIT_FAILURE,
+                 "%s TARGETDISTANCE: CLS band (0.05 < CLS < 0.95) is empty\n",
+                 upperCase(this->name).c_str());
+    }
+  }
+
   dt[0] = params.deltat;
   dt[1] = 0.0;
   dt[2] = 0.0;
@@ -959,9 +1046,12 @@ void lvlSet_t::pseudoStepper(const double &fluidTime)
     switch (stopMode) {
       case StopMode::targetSteps:
         return tstep >= (params.targetSteps + 1);
-      case StopMode::targetTime: {
+      case StopMode::targetTime:
         return time >= params.targetTime;
-      }
+      case StopMode::targetDistance:
+        // stepsMax prevents an endless solve when the characteristic speed
+        // is zero or extremely small throughout the domain.
+        return distanceTravelled >= targetDistance || tstep > this->stepsMax;
     }
     throw std::logic_error("Unhandled StopMode value");
   };
@@ -972,6 +1062,34 @@ void lvlSet_t::pseudoStepper(const double &fluidTime)
 
     // compute the advection coefficient
     this->computeAdvectionCoeff(tstep);
+
+    // Measure the actual characteristic-velocity magnitude after any
+    // boundary fix. A CLS-band region samples only 0.05 < CLS < 0.95;
+    // the velocity itself still comes from the evolving TLSR field.
+    double characteristicSpeed = 0.0;
+    if (stopMode == StopMode::targetDistance) {
+      platform->linAlg->magVector(mesh->Nlocal, this->vFieldOffset, this->o_W, o_speed);
+      occa::memory o_referenceSpeed = o_speed;
+      if (useCLSBand) {
+        // Excluded nodes cannot influence MAX/MIN; for MEAN they contribute 0.
+        const dfloat outsideValue = (distanceVelocity == "MIN") ? 1.e20 : 0.0;
+        maskCLSBandFieldKernel(mesh->Nlocal, clsBandLower, clsBandUpper,
+                               outsideValue, o_cls, o_speed, o_maskedSpeed);
+        o_referenceSpeed = o_maskedSpeed;
+      }
+      if (distanceVelocity == "MAX") {
+        characteristicSpeed = platform->linAlg->max(mesh->Nlocal, o_referenceSpeed,
+                                                    platform->comm.mpiComm());
+      } else if (distanceVelocity == "MIN") {
+        characteristicSpeed = platform->linAlg->min(mesh->Nlocal, o_referenceSpeed,
+                                                    platform->comm.mpiComm());
+      } else { // MEAN: volume-weighted average over selected region
+        const double regionVolume = useCLSBand ? clsBandVolume : mesh->volume;
+        characteristicSpeed = platform->linAlg->innerProd(
+            mesh->Nlocal, mesh->o_LMM, o_referenceSpeed,
+            platform->comm.mpiComm()) / regionVolume;
+      }
+    }
 
     // enforce CFL condition
     auto cfl = nrs->computeCFL(this->meshV, this->o_W, dt[0]);
@@ -988,6 +1106,11 @@ void lvlSet_t::pseudoStepper(const double &fluidTime)
     if (stopMode == StopMode::targetTime) {
       // make sure we don't overstep the targetTime
       dt[0] = std::min(dt[0], static_cast<dfloat>(params.targetTime - time));
+    } else if (stopMode == StopMode::targetDistance && characteristicSpeed > 0.0) {
+      // Avoid overshooting the chosen statistic's travel budget at the
+      // beginning-of-step speed (the speed may evolve within a step).
+      const double remainingDistance = targetDistance - distanceTravelled;
+      dt[0] = std::min(dt[0], static_cast<dfloat>(remainingDistance / characteristicSpeed));
     }
 
     // advance time here for implicit update
@@ -1007,12 +1130,27 @@ void lvlSet_t::pseudoStepper(const double &fluidTime)
     this->applyDirichlet(time);
     this->solve(time, 1);
 
+    if (stopMode == StopMode::targetDistance) {
+      // First-order quadrature using the velocity used for this pseudo-step.
+      distanceTravelled += static_cast<double>(dt[0]) * characteristicSpeed;
+    }
+
     MPI_Barrier(platform->comm.mpiComm());
     const double elapsedStep = MPI_Wtime() - timeStartStep;
     elapsedTime += elapsedStep;
 
     this->printStepInfo(time, cfl, tstep, true, true);
     tstep += 1;
+  }
+  if (stopMode == StopMode::targetDistance && platform->comm.mpiRank() == 0) {
+    printf("%s targetDistance = %.8e  velocityStatistic = %s  distanceRegion = %s  "
+           "accumulatedDistance = %.8e  pseudoTime = %.8e  pseudoSteps = %d\n",
+           upperCase(this->name).c_str(), targetDistance, distanceVelocity.c_str(),
+           distanceRegion.c_str(), distanceTravelled, time, tstep - 1);
+    if (distanceTravelled < targetDistance * (1.0 - 1e-6)) {
+      printf("WARNING: %s TARGETDISTANCE ended at maximumSteps before "
+             "reaching the requested distance.\n", upperCase(this->name).c_str());
+    }
   }
   this->writeFile(fluidTime, tstep);
 

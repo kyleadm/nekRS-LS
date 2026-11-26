@@ -10,6 +10,24 @@
   }
 }
 
+// Mask a nodal field outside the CLS interface band. Used for both
+// characteristic velocities and quadrature weights.
+@kernel void maskCLSBandField(const dlong Ntotal,
+                              const dfloat lower,
+                              const dfloat upper,
+                              const dfloat outsideValue,
+                              @ restrict const dfloat *CLS,
+                              @ restrict const dfloat *field,
+                              @ restrict dfloat *maskedField)
+{
+  for (dlong n = 0; n < Ntotal; ++n; @tile(p_blockSize, @outer, @inner)) {
+    if (n < Ntotal) {
+      const dfloat psi = CLS[n];
+      maskedField[n] = (psi > lower && psi < upper) ? field[n] : outsideValue;
+    }
+  }
+}
+
 @kernel void clampCLS(const dlong Ntotal,
                       @ restrict dfloat *PSI)
 {
