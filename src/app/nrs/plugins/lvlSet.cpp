@@ -113,6 +113,7 @@ static std::vector<std::string> scalarKeys = {
   {"absolutetol"},
   {"solvefrequency"},
   {"distancefactor"},
+  {"normalregularization"},
   {"distancevelocity"},
   {"distanceregion"},
   {"regularizationfactor"},
@@ -686,6 +687,16 @@ void parseLvlSetSections()
       }
     }
 
+    if (firstWord == "tlsr") {
+      std::string value;
+      if (ini->extract(parScope, "normalRegularization", value)) {
+        const double eps = std::stod(value);
+        nekrsCheck(eps < 0.0, platform->comm.mpiComm(), EXIT_FAILURE,
+                   "TLSR normalRegularization must be nonnegative (got %g)\n", eps);
+        options.setArgs("TLSR NORMAL REGULARIZATION", value);
+      }
+    }
+
     if (firstWord == "clsr") {
       std::string value;
 
@@ -1012,8 +1023,8 @@ void lvlSet_t::pseudoStepper(const double &fluidTime)
 
   // CLS is fixed during this pseudo-time solve. Build its interface band
   // once and reuse it to sample the evolving TLSR characteristic velocity.
-  constexpr dfloat clsBandLower = 0.005;
-  constexpr dfloat clsBandUpper = 0.995;
+  constexpr dfloat clsBandLower = 0.05;
+  constexpr dfloat clsBandUpper = 0.95;
   const bool useCLSBand = (stopMode == StopMode::targetDistance && distanceRegion == "CLSBAND");
   occa::memory o_speed;
   occa::memory o_maskedSpeed;
@@ -1575,7 +1586,7 @@ void lvlSet_t::setTimeIntegrationCoeffs(int tstep)
   }
 }
 
-void lvlSet::normalVector(const occa::memory& o_phi, occa::memory& o_normal, bool avg)
+void lvlSet::normalVector(const occa::memory& o_phi, occa::memory& o_normal, bool avg, dfloat eps)
 {
   auto mesh = nrs->scalar->mesh(nrs->scalar->nameToIndex.find("tls")->second);
 
@@ -1583,12 +1594,13 @@ void lvlSet::normalVector(const occa::memory& o_phi, occa::memory& o_normal, boo
     opSEM::strongGrad(mesh, nrs->scalar->vFieldOffset, o_phi, o_normal);
 
     //normalization seems necessary after averaging for TLSR stability
-    normalizeVectorKernel(mesh->Nlocal, nrs->scalar->vFieldOffset, o_normal);
+    normalizeVectorKernel(mesh->Nlocal, nrs->scalar->vFieldOffset, eps, o_normal);
   } else {
     normalVectorKernel(mesh->Nelements,
                      mesh->o_vgeo,
                      mesh->o_D,
                      nrs->scalar->vFieldOffset,
+                     eps,
                      o_phi,
                      o_normal);
   }
@@ -1626,7 +1638,9 @@ void lvlSet_t::computeAdvectionCoeff(int tstep)
     auto o_phi = this->o_S;
     auto meshV = this->meshV;
 
-    lvlSet::normalVector(o_phi, this->o_W, avg);
+    dfloat normalEps = 0.0;
+    platform->options.getArgs("TLSR NORMAL REGULARIZATION", normalEps);
+    lvlSet::normalVector(o_phi, this->o_W, avg, normalEps);
 
     auto o_sign = lvlSet::getSignField(o_phi);
   

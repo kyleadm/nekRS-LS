@@ -25,7 +25,7 @@ void clsrAx(elliptic_t* elliptic,
 
 void clsrPreconditioner(elliptic_t* elliptic, const occa::memory &o_r, occa::memory &o_z);
 
-void normalVector(const occa::memory &o_phi, occa::memory &o_normals, bool avg = true);
+void normalVector(const occa::memory &o_phi, occa::memory &o_normals, bool avg = true, dfloat eps = 0.0);
 void initHeaviside(const occa::memory& o_phi, occa::memory& o_psi, const dfloat epsin = -1.0);
 
 void applySurfaceTensionAcc(const dfloat& We, occa::memory &o_stForce);

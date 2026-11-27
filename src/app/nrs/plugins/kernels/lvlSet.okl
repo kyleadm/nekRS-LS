@@ -287,6 +287,7 @@ void rsum(dfloat *s_sum, const dlong t, const dlong bs) {
                           @ restrict const dfloat *vgeo,
                           @ restrict const dfloat *D,
                           const dlong offset,
+                          const dfloat eps,
                           @ restrict const dfloat *PHI,
                           @ restrict dfloat *NORMAL)
 {
@@ -353,13 +354,14 @@ void rsum(dfloat *s_sum, const dlong t, const dlong bs) {
 
           const dfloat cmag2 = nx * nx + ny * ny + nz * nz;
           const dfloat cmag = sqrt(cmag2);
+          const dfloat denom = (eps > 0.0) ? sqrt(cmag2 + eps * eps) : cmag;
 
           const dlong id = e * p_Np + k * p_Nq * p_Nq + j * p_Nq + i;
 
           if(cmag > 1e-12) {
-            NORMAL[id + 0 * offset] = nx / cmag;
-            NORMAL[id + 1 * offset] = ny / cmag;
-            NORMAL[id + 2 * offset] = nz / cmag;
+            NORMAL[id + 0 * offset] = nx / denom;
+            NORMAL[id + 1 * offset] = ny / denom;
+            NORMAL[id + 2 * offset] = nz / denom;
           }
           else {
             NORMAL[id + 0 * offset] = 0.0;
@@ -375,6 +377,7 @@ void rsum(dfloat *s_sum, const dlong t, const dlong bs) {
 
 @kernel void normalizeVector(const dlong Ntotal,
                              const dlong offset,
+                             const dfloat eps,
                              @ restrict dfloat *nvec)
 {
   for (dlong n = 0; n < Ntotal; ++n; @tile(p_blockSize, @outer, @inner)) {
@@ -384,11 +387,12 @@ void rsum(dfloat *s_sum, const dlong t, const dlong bs) {
       const dfloat nz = nvec[n + 2 * offset];
       const dfloat cmag2 = nx * nx + ny * ny + nz * nz;
       const dfloat cmag  = sqrt(cmag2);
+      const dfloat denom = (eps > 0.0) ? sqrt(cmag2 + eps * eps) : cmag;
 
       if(cmag > 1e-12) {
-        nvec[n + 0 * offset] = nx / cmag;
-        nvec[n + 1 * offset] = ny / cmag;
-        nvec[n + 2 * offset] = nz / cmag;
+        nvec[n + 0 * offset] = nx / denom;
+        nvec[n + 1 * offset] = ny / denom;
+        nvec[n + 2 * offset] = nz / denom;
       }
       else {
         nvec[n + 0 * offset] = 0.0;
